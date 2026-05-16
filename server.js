@@ -42,6 +42,10 @@ io.on("connection", (socket) => {
       rooms[roomId] = {
         players: {},
         selectedColors: {},
+        teams: {
+          A: { socketId: null, color: null, score: 0 },
+          B: { socketId: null, color: null, score: 0 }
+        },
         winner: null,
         locked: false
       };
@@ -49,15 +53,46 @@ io.on("connection", (socket) => {
 
     rooms[roomId].players[socket.id] = {
       deviceName,
-      color: null
+      color: null,
+      team: null
     };
 
     io.to(roomId).emit("room_state", rooms[roomId]);
   });
 
+  socket.on("select_team", ({ roomId, team }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    // Check if team is already taken
+    if (room.teams[team].socketId && room.teams[team].socketId !== socket.id) {
+      socket.emit("error_message", `El Equipo ${team} ya fue seleccionado.`);
+      return;
+    }
+
+    // Free previous team if changing
+    const player = room.players[socket.id];
+    if (player.team && player.team !== team) {
+      room.teams[player.team].socketId = null;
+      room.teams[player.team].color = null;
+    }
+
+    player.team = team;
+    room.teams[team].socketId = socket.id;
+
+    io.to(roomId).emit("room_state", room);
+    socket.emit("team_confirmed", { team });
+  });
+
   socket.on("select_color", ({ roomId, color }) => {
     const room = rooms[roomId];
     if (!room) return;
+
+    const player = room.players[socket.id];
+    if (!player || !player.team) {
+      socket.emit("error_message", "Primero debes elegir un equipo");
+      return;
+    }
 
     if (!availableColors.includes(color)) {
       socket.emit("error_message", "Color no válido");
@@ -69,8 +104,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    room.players[socket.id].color = color;
+    player.color = color;
     room.selectedColors[color] = socket.id;
+    room.teams[player.team].color = color;
 
     io.to(roomId).emit("room_state", room);
     socket.emit("color_confirmed", { color });
@@ -93,7 +129,8 @@ io.on("connection", (socket) => {
     room.winner = {
       socketId: socket.id,
       deviceName: player.deviceName,
-      color: player.color
+      color: player.color,
+      team: player.team
     };
 
     io.to(roomId).emit("winner_selected", room.winner);
@@ -111,6 +148,66 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("room_state", room);
   });
 
+  socket.on("change_color", ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    const player = room.players[socket.id];
+    if (!player) return;
+
+    if (player.color) {
+      delete room.selectedColors[player.color];
+    }
+
+    if (player.team) {
+      room.teams[player.team].color = null;
+    }
+
+    player.color = null;
+
+    socket.emit("color_released");
+    io.to(roomId).emit("room_state", room);
+  });
+
+  socket.on("change_team", ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    const player = room.players[socket.id];
+    if (!player) return;
+
+    if (player.color) {
+      delete room.selectedColors[player.color];
+    }
+    if (player.team) {
+      room.teams[player.team].socketId = null;
+      room.teams[player.team].color = null;
+    }
+
+    player.color = null;
+    player.team = null;
+
+    socket.emit("team_released");
+    io.to(roomId).emit("room_state", room);
+  });
+
+  socket.on("reset_scores", ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    if(room.teams.A) room.teams.A.score = 0;
+    if(room.teams.B) room.teams.B.score = 0;
+    io.to(roomId).emit("room_state", room);
+  });
+
+  socket.on("add_points", ({ roomId, team, points }) => {
+    const room = rooms[roomId];
+    if (!room || !room.teams[team]) return;
+
+    room.teams[team].score += points;
+    io.to(roomId).emit("room_state", room);
+  });
+
   socket.on("disconnect", () => {
     console.log("Dispositivo desconectado:", socket.id);
 
@@ -118,10 +215,15 @@ io.on("connection", (socket) => {
       const room = rooms[roomId];
 
       if (room.players[socket.id]) {
-        const color = room.players[socket.id].color;
+        const player = room.players[socket.id];
 
-        if (color) {
-          delete room.selectedColors[color];
+        if (player.color) {
+          delete room.selectedColors[player.color];
+        }
+
+        if (player.team && room.teams[player.team].socketId === socket.id) {
+          room.teams[player.team].socketId = null;
+          room.teams[player.team].color = null;
         }
 
         delete room.players[socket.id];
@@ -134,6 +236,6 @@ io.on("connection", (socket) => {
 
 const PORT = 3001;
 
-server.listen(PORT, () => {
-  console.log(`Servidor Socket.IO corriendo en http://localhost:${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Servidor Socket.IO corriendo en puerto ${PORT}`);
 });
